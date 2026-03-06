@@ -1,3 +1,4 @@
+import httpx
 """ETL pipeline: fetch data from the autochecker API and load it into the database.
 
 The autochecker dashboard API provides two endpoints:
@@ -6,6 +7,8 @@ The autochecker dashboard API provides two endpoints:
 
 Both require HTTP Basic Auth (email + password from settings).
 """
+from sqlmodel import select, func
+from app.models.interaction import InteractionLog
 
 from datetime import datetime
 
@@ -22,7 +25,6 @@ from app.settings import settings
 async def fetch_items() -> list[dict]:
     """Fetch the lab/task catalog from the autochecker API.
 
-    TODO: Implement this function.
     - Use httpx.AsyncClient to GET {settings.autochecker_api_url}/api/items
     - Pass HTTP Basic Auth using settings.autochecker_email and
       settings.autochecker_password
@@ -31,7 +33,23 @@ async def fetch_items() -> list[dict]:
     - Return the parsed list of dicts
     - Raise an exception if the response status is not 200
     """
-    raise NotImplementedError
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{settings.autochecker_api_url}/api/items",
+            auth=BasicAuth(
+                username=settings.autochecker_email,
+                password=settings.autochecker_password
+            )
+        )
+        
+        # Raise exception if status is not 200
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Failed to fetch items: {response.status_code} - {response.text}"
+            )
+        
+        # Parse and return JSON array
+        return response.json()
 
 
 async def fetch_logs(since: datetime | None = None) -> list[dict]:
@@ -130,18 +148,28 @@ async def load_logs(
 
 
 async def sync(session: AsyncSession) -> dict:
-    """Run the full ETL pipeline.
-
-    TODO: Implement this function.
-    - Step 1: Fetch items from the API (keep the raw list) and load them
-      into the database
-    - Step 2: Determine the last synced timestamp
-      - Query the most recent created_at from InteractionLog
-      - If no records exist, since=None (fetch everything)
-    - Step 3: Fetch logs since that timestamp and load them
-      - Pass the raw items list to load_logs so it can map short IDs
-        to titles
-    - Return a dict: {"new_records": <number of new interactions>,
-                      "total_records": <total interactions in DB>}
-    """
-    raise NotImplementedError
+    """Run the full ETL pipeline."""
+    # Step 1: Fetch and load items
+    items_data = await fetch_items()
+    new_items = await load_items(items_data, session)
+    
+    # Step 2: Get last sync timestamp
+    result = await session.exec(
+        select(InteractionLog.created_at)
+        .order_by(InteractionLog.created_at.desc())
+        .limit(1)
+    )
+    last_log = result.first()
+    since = last_log if last_log else None
+    
+    # Step 3: Fetch and load logs
+    logs_data = await fetch_logs(since)
+    new_logs = await load_logs(logs_data, items_data, session)
+    
+    # Step 4: Get total count
+    total = await session.exec(select(func.count(InteractionLog.id))).first()
+    
+    return {
+        "new_records": new_logs,
+        "total_records": total
+    }
